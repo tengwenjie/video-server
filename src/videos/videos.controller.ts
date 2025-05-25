@@ -85,59 +85,78 @@ import {
 
     @Post('trim')
     @UseInterceptors(
-        FileInterceptor('video', {
+      FileInterceptor('video', {
         storage: diskStorage({
-            destination: './uploads',
-            filename: (req, file, cb) => {
+          destination: './uploads',
+          filename: (req, file, cb) => {
             const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
             cb(null, uniqueSuffix + path.extname(file.originalname));
-            }
+          }
         })
-        })
+      })
     )
     async trimVideo(
-        @UploadedFile() file: MulterFile,
-        @Body('start') start: string,
-        @Body('end') end: string,
-        @Res() res: Response
-      ) {
-        if (!file) {
-          return res.status(400).send('No video uploaded.');
-        }
-    
-        const outputName = 'trimmed_' + Date.now() + '.mp4';
-        const outputPath = path.join(process.cwd(), 'uploads', outputName);
-    
-        // 构建 ffmpeg 命令
-        // -ss: 开始时间, -to: 结束时间
-        const cmd = `ffmpeg -i "${file.path}" -ss ${start} -to ${end} -c:v libx264 -c:a aac -strict experimental "${outputPath}" -y`;
-    
-        try {
-          await new Promise<void>((resolve, reject) => {
-            exec(cmd, (err, stdout, stderr) => {
-              // 删除上传的原始视频
-              fs.unlinkSync(file.path);
-              if (err) {
-                console.error(stderr);
-                reject(err);
-              } else {
-                resolve();
-              }
-            });
-          });
-    
-          // 下载裁剪后的视频，并删除
-          res.download(outputPath, 'trimmed.mp4', (downloadErr) => {
-            fs.unlinkSync(outputPath);
-            if (downloadErr) {
-              console.error('Download error:', downloadErr);
-            }
-          });
-        } catch (err) {
-          console.error('裁剪失败', err);
-          res.status(500).send('裁剪失败');
-        }
+      @UploadedFile() file: MulterFile,
+      @Body('start') start: string,
+      @Body('end') end: string,
+      @Res() res: Response
+    ) {
+      if (!file) {
+        return res.status(400).send('No video uploaded.');
       }
-    
+
+      // 路径设置
+      const base = path.parse(file.path).name;
+      const ext = path.extname(file.path);
+      const part1 = path.join(process.cwd(), 'uploads', `${base}_part1${ext}`);
+      const part2 = path.join(process.cwd(), 'uploads', `${base}_part2${ext}`);
+      const listPath = path.join(process.cwd(), 'uploads', `${base}_concat.txt`);
+      const outputName = `trimmed_${Date.now()}${ext}`;
+      const outputPath = path.join(process.cwd(), 'uploads', outputName);
+
+      try {
+        // 1. 提取 [0, start)
+        await new Promise<void>((resolve, reject) => {
+          exec(`ffmpeg -i "${file.path}" -t ${start} -c copy "${part1}" -y`, (err) => {
+            if (err) return reject(err); resolve();
+          });
+        });
+
+        // 2. 提取 [end, 视频结束)
+        await new Promise<void>((resolve, reject) => {
+          exec(`ffmpeg -i "${file.path}" -ss ${end} -c copy "${part2}" -y`, (err) => {
+            if (err) return reject(err); resolve();
+          });
+        });
+
+        // 3. 生成 concat.txt
+        fs.writeFileSync(listPath, `file '${part1}'\nfile '${part2}'\n`);
+
+        // 4. 拼接两段并转码
+        await new Promise<void>((resolve, reject) => {
+          exec(`ffmpeg -f concat -safe 0 -i "${listPath}" -c:v libx264 -c:a aac -strict experimental "${outputPath}" -y`, (err) => {
+            if (err) return reject(err); resolve();
+          });
+        });
+
+        // 5. 删除临时文件
+        fs.unlinkSync(file.path);
+        fs.unlinkSync(part1);
+        fs.unlinkSync(part2);
+        fs.unlinkSync(listPath);
+
+        // 6. 下载并删除输出
+        res.download(outputPath, 'trimmed.mp4', (downloadErr) => {
+          fs.unlinkSync(outputPath);
+          if (downloadErr) {
+            console.error('Download error:', downloadErr);
+          }
+        });
+      } catch (err) {
+        console.error('裁剪失败', err);
+        res.status(500).send('裁剪失败');
+      }
+    }
+
   }
   
